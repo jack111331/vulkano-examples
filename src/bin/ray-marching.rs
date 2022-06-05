@@ -20,14 +20,13 @@ use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
 use vulkano::device::{Device, DeviceExtensions};
 use vulkano::render_pass::{Framebuffer, Subpass, RenderPass};
-// use vulkano::pipeline::compute::ComputePipeline;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::image::{ImageUsage, SwapchainImage, ImageAccess};
 use vulkano::image::view::ImageView;
 use vulkano::instance::Instance;
 use vulkano::Version;
 use vulkano::device::physical::PhysicalDevice;
-use vulkano::pipeline::graphics::viewport::Viewport;
+use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::{GraphicsPipeline, PipelineBindPoint, DynamicState, ComputePipeline, Pipeline};
 use vulkano::swapchain;
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
@@ -46,6 +45,8 @@ use winit::window::{Window, WindowBuilder};
 use std::collections::HashMap;
 
 use std::sync::Arc;
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::buffer::cpu_access::ReadLock;
 
 fn main() {
     // The first step of any Vulkan program is to create an instance.
@@ -56,7 +57,6 @@ fn main() {
     // to enable manually. To do so, we ask the `vulkano_win` crate for the list of extensions
     // required to draw to a window.
     let required_extensions = vulkano_win::required_extensions();
-
     // Now creating the instance.
     let instance = Instance::new(None, Version::V1_1, &required_extensions, None).unwrap();
 
@@ -331,6 +331,12 @@ fn main() {
     )
     .unwrap();
 
+    let viewport = Viewport {
+        origin: [0.0, 0.0],
+        dimensions: [800.0, 600.0],
+        depth_range: 0.0..1.0,
+    };
+
     // Before we draw we have to create what is called a pipeline. This is similar to an OpenGL
     // program, but much more specific.
     let pipeline = GraphicsPipeline::start()
@@ -343,9 +349,9 @@ fn main() {
             // the entry point.
             .vertex_shader(vs.entry_point("main").unwrap(), ())
             // The content of the vertex buffer describes a list of triangles.
-            .triangle_list()
+            .input_assembly_state(InputAssemblyState::new())
             // Use a resizable viewport set to draw over the entire window
-            .viewports_dynamic_scissors_irrelevant(1)
+            .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
             // See `vertex_shader`.
             .fragment_shader(fs.entry_point("main").unwrap(), ())
             // We have to indicate which subpass of which render pass this pipeline is going to be used
@@ -463,7 +469,6 @@ fn main() {
                 // Calling this function polls various fences in order to determine what the GPU has
                 // already processed, and frees the resources that are no longer needed.
                 previous_frame_end.as_mut().unwrap().cleanup_finished();
-
                 // Whenever the window resizes we need to recreate everything dependent on the window size.
                 // In this example that includes the swapchain, the framebuffers and the dynamic state viewport.
                 if recreate_swapchain {
@@ -594,6 +599,14 @@ fn main() {
 
                 match future {
                     Ok(future) => {
+                        future.wait(None).unwrap();
+                        println!("Check");
+                        let data_buffer_content = data_buffer.read().unwrap();
+                        for n in 0..65536u32 {
+                            assert_eq!(data_buffer_content[n as usize], n * 12);
+                            println!("{}, {}", n, data_buffer_content[n as usize]);
+                        }
+                        *control_flow = ControlFlow::Exit;
                         previous_frame_end = Some(future.boxed());
                     }
                     Err(FlushError::OutOfDate) => {
@@ -609,10 +622,6 @@ fn main() {
             _ => (),
         }
     });
-    let data_buffer_content = data_buffer.read().unwrap();
-    for n in 0..65536u32 {
-        assert_eq!(data_buffer_content[n as usize], n * 12);
-    }
 }
 
 /// This method is called once during initialization, then again whenever the window is resized
@@ -621,15 +630,6 @@ fn window_size_dependent_setup(
     render_pass: Arc<RenderPass>,
     dynamic_state: &mut HashMap<DynamicState, bool>,
 ) -> Vec<Arc<Framebuffer>> {
-    let dimensions = images[0].dimensions();
-
-    let viewport = Viewport {
-        origin: [0.0, 0.0],
-        dimensions: [dimensions.width() as f32, dimensions.height() as f32],
-        depth_range: 0.0..1.0,
-    };
-    // FIXME
-    // dynamic_state.insert(DynamicState::Viewport, vec![viewport]);
 
     images
         .iter()
