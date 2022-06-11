@@ -17,7 +17,7 @@
 // what a vertex or a shader is.
 
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
 use vulkano::device::{Device, DeviceExtensions};
 use vulkano::render_pass::{Framebuffer, Subpass, RenderPass};
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
@@ -47,6 +47,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::buffer::cpu_access::ReadLock;
+use vulkano::descriptor_set::layout::{DescriptorDesc, DescriptorSetDesc};
+use vulkano::shader::ShaderStages;
+use vulkano::shader::DescriptorRequirementsIncompatible::DescriptorType;
+
+extern crate ray_marching_utils;
+use ray_marching_utils::Camera;
 
 fn main() {
     // The first step of any Vulkan program is to create an instance.
@@ -154,6 +160,7 @@ fn main() {
     // Since we can request multiple queues, the `queues` variable is in fact an iterator. In this
     // example we use only one queue, so we just retrieve the first and only element of the
     // iterator and throw it away.
+    // here we use graphic queue family
     let queue = queues.next().unwrap();
 
     // Before we can draw on the surface, we have to create what is called a swapchain. Creating
@@ -311,26 +318,6 @@ fn main() {
     }
     vulkano::impl_vertex!(Vertex, position);
 
-    let vertex_buffer = CpuAccessibleBuffer::from_iter(
-        device.clone(),
-        BufferUsage::all(),
-        false,
-        [
-            Vertex {
-                position: [-0.5, -0.25],
-            },
-            Vertex {
-                position: [0.0, 0.5],
-            },
-            Vertex {
-                position: [0.25, -0.1],
-            },
-        ]
-        .iter()
-        .cloned(),
-    )
-    .unwrap();
-
     let viewport = Viewport {
         origin: [0.0, 0.0],
         dimensions: [800.0, 600.0],
@@ -367,25 +354,37 @@ fn main() {
                 src: "
                     #version 450
                     layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+                    layout(binding = 1) uniform test {
+                        uint a;
+                    } ubo;
+                    layout(binding = 2) uniform test2 {
+                        uint b;
+                    } ubo2;
                     layout(set = 0, binding = 0) buffer Data {
                         uint data[];
                     } data;
                     void main() {
                         uint idx = gl_GlobalInvocationID.x;
-                        data.data[idx] *= 12;
+                        data.data[idx] *= 12 + ubo.a;
                     }
                 "
             }
         }
         let shader = cs::load(device.clone()).unwrap();
+        // it will automatically parse shader's buffer object descriptor
+        // ubo Some(DescriptorDesc { ty: UniformBuffer, descriptor_count: 1, variable_count: false, stages: ShaderStages { vertex: false, tessellation_control: false, tessellation_evaluation: false, geometry: false, fragment: false, compute: true, raygen: false, any_hit: false, closest_hit: false, miss: false, intersection: false, callable: false }, immutable_samplers: [] }),
+
         ComputePipeline::new(
             device.clone(),
             shader.entry_point("main").unwrap(),
             &(),
             None,
-            |_| {},
+            |dd| {
+                println!("DescriptorSetDesc for compute shader: {:?}", dd);
+            },
         )
         .unwrap()
+
     };
 
     let data_buffer = {
@@ -402,11 +401,32 @@ fn main() {
         ).unwrap()
     };
 
+    let uniform_data_buffer = {
+        let data = Camera {
+            position: [0.0, 0.0, 0.0],
+            direction: [0.0, 0.0, 0.0],
+            up: [0.0, 0.0, 0.0],
+            fov: 45.0
+        };
+
+        CpuAccessibleBuffer::from_data(
+            device.clone(),
+            BufferUsage {
+                uniform_buffer: true,
+                ..BufferUsage::none()
+            },
+            false,
+            data,
+        ).unwrap()
+    };
+
     let layout = compute_pipeline.layout().descriptor_set_layouts().get(0).unwrap();
     let set = PersistentDescriptorSet::new(
         layout.clone(),
-        [WriteDescriptorSet::buffer(0, data_buffer.clone())],
+        [WriteDescriptorSet::buffer(0, data_buffer.clone()),
+        WriteDescriptorSet::buffer(1, uniform_data_buffer.clone())],
     ).unwrap();
+
 
     // Dynamic viewports allow us to recreate just the viewport when the window is resized
     // Otherwise we would have to recreate the whole pipeline.
@@ -519,7 +539,7 @@ fn main() {
                 }
 
                 // Specify the color to clear the framebuffer with i.e. blue
-                // let clear_values = vec![[0.0, 0.0, 1.0, 1.0].into()];
+                let clear_values = vec![[0.0, 0.0, 1.0, 1.0].into()];
 
                 // In order to draw, we have to build a *command buffer*. The command buffer object holds
                 // the list of commands that are going to be executed.
@@ -539,35 +559,37 @@ fn main() {
                 
 
                 builder
-                    // // Before we can draw, we have to *enter a render pass*. There are two methods to do
-                    // // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
-                    // // not covered here.
-                    // //
-                    // // The third parameter builds the list of values to clear the attachments with. The API
-                    // // is similar to the list of attachments when building the framebuffers, except that
-                    // // only the attachments that use `load: Clear` appear in the list.
-                    // .begin_render_pass(
-                    //     framebuffers[image_num].clone(),
-                    //     SubpassContents::Inline,
-                    //     clear_values,
-                    // )
-                    // .unwrap()
-                    // // We are now inside the first subpass of the render pass. We add a draw command.
-                    // //
-                    // // The last two parameters contain the list of resources to pass to the shaders.
-                    // // Since we used an `EmptyPipeline` object, the objects have to be `()`.
-                    // .draw(
-                    //     pipeline.clone(),
-                    //     &dynamic_state,
-                    //     vertex_buffer.clone(),
-                    //     (),
-                    //     (),
-                    // )
-                    // .unwrap()
-                    // // We leave the render pass by calling `draw_end`. Note that if we had multiple
-                    // // subpasses we could have called `next_inline` (or `next_secondary`) to jump to the
-                    // // next subpass.
-                    // .end_render_pass()
+                    .bind_vertex_buffers(0, vertex_buffer.clone())
+                    // Before we can draw, we have to *enter a render pass*. There are two methods to do
+                    // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
+                    // not covered here.
+                    //
+                    // The third parameter builds the list of values to clear the attachments with. The API
+                    // is similar to the list of attachments when building the framebuffers, except that
+                    // only the attachments that use `load: Clear` appear in the list.
+                    .begin_render_pass(
+                        framebuffers[image_num].clone(),
+                        SubpassContents::Inline,
+                        clear_values,
+                    )
+                    .unwrap()
+                    .bind_pipeline_graphics(pipeline.clone())
+                    // We are now inside the first subpass of the render pass. We add a draw command.
+                    //
+                    // The last two parameters contain the list of resources to pass to the shaders.
+                    // Since we used an `EmptyPipeline` object, the objects have to be `()`.
+                    .draw(
+                        3,
+                        1,
+                        0,
+                        0,
+                    )
+                    .unwrap()
+                    // We leave the render pass by calling `draw_end`. Note that if we had multiple
+                    // subpasses we could have called `next_inline` (or `next_secondary`) to jump to the
+                    // next subpass.
+                    .end_render_pass()
+                    .unwrap()
                     
                     .bind_pipeline_compute(compute_pipeline.clone())
                     .bind_descriptor_sets(
@@ -601,12 +623,12 @@ fn main() {
                     Ok(future) => {
                         future.wait(None).unwrap();
                         println!("Check");
-                        let data_buffer_content = data_buffer.read().unwrap();
-                        for n in 0..65536u32 {
-                            assert_eq!(data_buffer_content[n as usize], n * 12);
-                            println!("{}, {}", n, data_buffer_content[n as usize]);
-                        }
-                        *control_flow = ControlFlow::Exit;
+                        // let data_buffer_content = data_buffer.read().unwrap();
+                        // for n in 0..65536u32 {
+                        //     assert_eq!(data_buffer_content[n as usize], n * 12);
+                        //     println!("{}, {}", n, data_buffer_content[n as usize]);
+                        // }
+                        // *control_flow = ControlFlow::Exit;
                         previous_frame_end = Some(future.boxed());
                     }
                     Err(FlushError::OutOfDate) => {
