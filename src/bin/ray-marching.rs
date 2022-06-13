@@ -18,11 +18,12 @@
 
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
+use vulkano::format::{Format, ClearValue};
 use vulkano::device::{Device, DeviceExtensions};
 use vulkano::render_pass::{Framebuffer, Subpass, RenderPass};
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
-use vulkano::image::{ImageUsage, SwapchainImage, ImageAccess};
-use vulkano::image::view::ImageView;
+use vulkano::image::{ImageUsage, SwapchainImage, AttachmentImage, ImageAccess};
+use vulkano::image::view::{ImageView, ImageViewAbstract};
 use vulkano::instance::Instance;
 use vulkano::Version;
 use vulkano::device::physical::PhysicalDevice;
@@ -34,6 +35,7 @@ use vulkano::swapchain::{
     AcquireError, Swapchain,
     SwapchainCreationError,
 };
+use vulkano::sampler::{Filter, Sampler, SamplerAddressMode};
 use vulkano::sync;
 use vulkano::sync::{FlushError, GpuFuture};
 
@@ -216,13 +218,22 @@ fn main() {
             false,
             [
                 Vertex {
-                    position: [-0.5, -0.25],
+                    position: [-1.0, -1.0],
                 },
                 Vertex {
-                    position: [0.0, 0.5],
+                    position: [-1.0, 1.0],
                 },
                 Vertex {
-                    position: [0.25, -0.1],
+                    position: [1.0, 1.0],
+                },
+                Vertex {
+                    position: [-1.0, -1.0],
+                },
+                Vertex {
+                    position: [1.0, 1.0],
+                },
+                Vertex {
+                    position: [1.0, -1.0],
                 },
             ]
             .iter()
@@ -230,6 +241,45 @@ fn main() {
         )
         .unwrap()
     };
+
+    let texcoord_buffer = {
+        #[derive(Default, Debug, Clone)]
+        struct Texcoord {
+            texcoord: [f32; 2],
+        }
+        vulkano::impl_vertex!(Texcoord, texcoord);
+
+        CpuAccessibleBuffer::from_iter(
+            device.clone(),
+            BufferUsage::all(),
+            false,
+            [
+                Texcoord {
+                    texcoord: [0.0, 0.0],
+                },
+                Texcoord {
+                    texcoord: [0.0, 1.0],
+                },
+                Texcoord {
+                    texcoord: [1.0, 1.0],
+                },
+                Texcoord {
+                    texcoord: [0.0, 0.0],
+                },
+                Texcoord {
+                    texcoord: [1.0, 1.0],
+                },
+                Texcoord {
+                    texcoord: [1.0, 0.0],
+                },
+            ]
+                .iter()
+                .cloned(),
+        )
+            .unwrap()
+    };
+
+
 
     // The next step is to create the shaders.
     //
@@ -246,9 +296,13 @@ fn main() {
 				#version 450
 
 				layout(location = 0) in vec2 position;
+				layout(location = 1) in vec2 texcoord;
+
+				layout(location = 0) out vec2 fTexcoord;
 
 				void main() {
 					gl_Position = vec4(position, 0.0, 1.0);
+					fTexcoord = texcoord;
 				}
 			"
         }
@@ -259,11 +313,15 @@ fn main() {
             ty: "fragment",
             src: "
 				#version 450
+				layout(location = 0) in vec2 fTexcoord;
 
 				layout(location = 0) out vec4 f_color;
+                layout(set = 0, binding = 0) uniform sampler2D texSampler;
+
 
 				void main() {
-					f_color = vec4(1.0, 0.0, 0.0, 1.0);
+
+					f_color = texture(texSampler, fTexcoord);
 				}
 			"
         }
@@ -279,6 +337,7 @@ fn main() {
     // The next step is to create a *render pass*, which is an object that describes where the
     // output of the graphics pipeline will go. It describes the layout of the images
     // where the colors, depth and/or stencil information will be written.
+    // NOTICE: render_pass assign output attachments = =
     let render_pass = vulkano::single_pass_renderpass!(
         device.clone(),
         attachments: {
@@ -318,6 +377,13 @@ fn main() {
     }
     vulkano::impl_vertex!(Vertex, position);
 
+    #[repr(C)]
+    #[derive(Default, Debug, Clone)]
+    struct Texcoord {
+        texcoord: [f32; 2],
+    }
+    vulkano::impl_vertex!(Texcoord, texcoord);
+
     let viewport = Viewport {
         origin: [0.0, 0.0],
         dimensions: [800.0, 600.0],
@@ -330,7 +396,7 @@ fn main() {
             // We need to indicate the layout of the vertices.
             // The type `SingleBufferDefinition` actually contains a template parameter corresponding
             // to the type of each vertex. But in this code it is automatically inferred.
-            .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+            .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>().vertex::<Texcoord>())
             // A Vulkan shader can in theory contain multiple entry points, so we have to specify
             // which one. The `main` word of `main_entry_point` actually corresponds to the name of
             // the entry point.
@@ -349,6 +415,7 @@ fn main() {
             .unwrap();
     let compute_pipeline = {
         mod cs {
+            // check data.data is input as vec4??
             vulkano_shaders::shader! {
                 ty: "compute",
                 src: "
@@ -361,11 +428,12 @@ fn main() {
                         uint b;
                     } ubo2;
                     layout(set = 0, binding = 0) buffer Data {
-                        uint data[];
+                        vec4 data[];
                     } data;
                     void main() {
-                        uint idx = gl_GlobalInvocationID.x;
-                        data.data[idx] *= 12 + ubo.a;
+                        uint yidx = gl_GlobalInvocationID.x;
+                        uint xidx = gl_GlobalInvocationID.y;
+                        data.data[yidx * 800 + xidx] = vec4(float(yidx) / 600, float(xidx) / 800, 0.0, 1.0) + 0.001 * vec4(ubo.a, ubo.a, ubo.a, 0.0);
                     }
                 "
             }
@@ -388,16 +456,15 @@ fn main() {
     };
 
     let data_buffer = {
-        let data_iter = (0..65536u32).map(|n| n);
-
         CpuAccessibleBuffer::from_iter(
             device.clone(),
             BufferUsage {
                 storage_buffer: true,
+                transfer_source: true,
                 ..BufferUsage::none()
             },
             false,
-            data_iter,
+            (0..800*600).map(|_| (1.0_f32,0.0_f32,0.0_f32,0.0_f32)),
         ).unwrap()
     };
 
@@ -420,17 +487,47 @@ fn main() {
         ).unwrap()
     };
 
-    let layout = compute_pipeline.layout().descriptor_set_layouts().get(0).unwrap();
-    let set = PersistentDescriptorSet::new(
-        layout.clone(),
+    let atch_usage = ImageUsage {
+        // transient_attachment: true,
+        input_attachment: true,
+        transfer_destination: true,
+        sampled: true,
+        ..ImageUsage::none()
+    };
+
+
+    let compute_layout = compute_pipeline.layout().descriptor_set_layouts().get(0).unwrap();
+    let compute_set = PersistentDescriptorSet::new(
+        compute_layout.clone(),
         [WriteDescriptorSet::buffer(0, data_buffer.clone()),
-        WriteDescriptorSet::buffer(1, uniform_data_buffer.clone())],
+            WriteDescriptorSet::buffer(1, uniform_data_buffer.clone())],
+    ).unwrap();
+
+    // TODO https://github.com/vulkano-rs/vulkano/blob/ac3e4311680ec3ed9f9d6c11db6bef8a37003a4f/examples/src/bin/deferred/frame/system.rs
+    let output_image_view = ImageView::new(AttachmentImage::with_usage(
+        device.clone(),
+        [800, 600],
+        Format::R32G32B32A32_SFLOAT,
+        atch_usage,
+    ).unwrap()
+    ).unwrap();
+
+    let sampler = Sampler::simple_repeat_linear(device.clone())
+        .unwrap();
+
+    let graphic_layout = pipeline.layout().descriptor_set_layouts()
+        .get(0)
+        .unwrap();
+    // FIXME
+    let graphic_set = PersistentDescriptorSet::new(
+        graphic_layout.clone(),
+        [WriteDescriptorSet::image_view_sampler(0, output_image_view.clone(), sampler.clone())],
     ).unwrap();
 
 
     // Dynamic viewports allow us to recreate just the viewport when the window is resized
     // Otherwise we would have to recreate the whole pipeline.
-    let mut dynamic_state: HashMap<DynamicState, bool> = HashMap::default();
+    // let mut dynamic_state: HashMap<DynamicState, bool> = HashMap::default();
     // DynamicState {
     //     LineWidth(None),
     //     viewports: None,
@@ -445,8 +542,9 @@ fn main() {
     //
     // Since we need to draw to multiple images, we are going to create a different framebuffer for
     // each image.
+
     let mut framebuffers =
-        window_size_dependent_setup(&images, render_pass.clone(), &mut dynamic_state);
+        window_size_dependent_setup(&images, render_pass.clone());
 
     // Initialization is finally finished!
 
@@ -509,7 +607,6 @@ fn main() {
                     framebuffers = window_size_dependent_setup(
                         &new_images,
                         render_pass.clone(),
-                        &mut dynamic_state,
                     );
                     recreate_swapchain = false;
                 }
@@ -556,10 +653,23 @@ fn main() {
                     CommandBufferUsage::OneTimeSubmit,
                 )
                 .unwrap();
-                
-
                 builder
+                    .bind_pipeline_compute(compute_pipeline.clone())
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Compute,
+                        compute_pipeline.layout().clone(),
+                        0,
+                        compute_set.clone(),
+                    )
+                    .dispatch([600, 800, 1])
+                    .unwrap()
+
+                    // TODO directly copy buffer to image isn't feasible, because framebuffer's ImageView don't have transfer bit allowed
+                    .copy_buffer_to_image(data_buffer.clone(), output_image_view.image().clone())
+                    .unwrap()
+
                     .bind_vertex_buffers(0, vertex_buffer.clone())
+                    .bind_vertex_buffers(1, texcoord_buffer.clone())
                     // Before we can draw, we have to *enter a render pass*. There are two methods to do
                     // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
                     // not covered here.
@@ -574,12 +684,18 @@ fn main() {
                     )
                     .unwrap()
                     .bind_pipeline_graphics(pipeline.clone())
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        pipeline.layout().clone(),
+                        0,
+                        graphic_set.clone(),
+                    )
                     // We are now inside the first subpass of the render pass. We add a draw command.
                     //
                     // The last two parameters contain the list of resources to pass to the shaders.
                     // Since we used an `EmptyPipeline` object, the objects have to be `()`.
                     .draw(
-                        3,
+                        6,
                         1,
                         0,
                         0,
@@ -589,19 +705,9 @@ fn main() {
                     // subpasses we could have called `next_inline` (or `next_secondary`) to jump to the
                     // next subpass.
                     .end_render_pass()
-                    .unwrap()
-                    
-                    .bind_pipeline_compute(compute_pipeline.clone())
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Compute,
-                        compute_pipeline.layout().clone(),
-                        0,
-                        set.clone(),
-                    )
-                    .dispatch([1024, 1, 1])                    
                     .unwrap();
-
                 // Finish building the command buffer by calling `build`.
+
                 let command_buffer = builder.build().unwrap();
 
                 let future = previous_frame_end
@@ -650,7 +756,6 @@ fn main() {
 fn window_size_dependent_setup(
     images: &[Arc<SwapchainImage<Window>>],
     render_pass: Arc<RenderPass>,
-    dynamic_state: &mut HashMap<DynamicState, bool>,
 ) -> Vec<Arc<Framebuffer>> {
 
     images
