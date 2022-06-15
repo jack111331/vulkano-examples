@@ -22,8 +22,8 @@ use vulkano::format::{Format, ClearValue};
 use vulkano::device::{Device, DeviceExtensions};
 use vulkano::render_pass::{Framebuffer, Subpass, RenderPass};
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
-use vulkano::image::{ImageUsage, SwapchainImage, AttachmentImage, ImageAccess};
-use vulkano::image::view::{ImageView, ImageViewAbstract};
+use vulkano::image::{ImageUsage, SwapchainImage, AttachmentImage};
+use vulkano::image::view::{ImageView};
 use vulkano::instance::Instance;
 use vulkano::Version;
 use vulkano::device::physical::PhysicalDevice;
@@ -415,25 +415,103 @@ fn main() {
             .unwrap();
     let compute_pipeline = {
         mod cs {
-            // check data.data is input as vec4??
             vulkano_shaders::shader! {
                 ty: "compute",
                 src: "
                     #version 450
                     layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-                    layout(binding = 1) uniform test {
-                        uint a;
-                    } ubo;
-                    layout(binding = 2) uniform test2 {
-                        uint b;
-                    } ubo2;
                     layout(set = 0, binding = 0) buffer Data {
                         vec4 data[];
                     } data;
+                    struct Camera {
+                        vec3 position;
+                        float placeholder0;
+                        vec3 direction;
+                        float placeholder1;
+                        vec3 up;
+                        float placeholder2;
+                        float fov;
+                        float placeholder3;
+                        float placeholder4;
+                        float placeholder5;
+                    };
+                    layout(std140, set = 0, binding = 1) uniform CameraUBO {
+                        Camera camera;
+                    } cameraUBO;
+
+                    struct Ray {
+                        vec3 origin;
+                        vec3 direction;
+                    };
+
+                    Ray construct_ray_short(Camera camera) {
+                        // camera_coord range from ([-400, 400], [-300, 300])
+                        Ray result;
+                        result.origin = camera.position;
+                        result.direction = vec3(0.0, 0.0, 0.0);
+                        return result;
+                    }
+
+                    Ray construct_ray(Camera camera, ivec2 camera_coord) {
+                        // camera_coord range from ([-400, 400], [-300, 300])
+                        Ray result;
+                        result.origin = camera.position;
+                        vec3 right = normalize(tan(radians(camera.fov)) * normalize(cross(camera.direction, camera.up)));
+                        result.direction = camera.direction + (float(camera_coord.x)/400) * right + (float(camera_coord.y)/400) * normalize(camera.up);
+                        return result;
+                    }
+
+                    const vec3 sphere_pos = vec3(0.0, 0.0, 0.0);
+                    const float sphere_size = 0.1;
+
+                    float calculate_remain_length(in Ray ray) {
+                    // p - o - t*d dot d = 0
+                    // (p dot d) - (o dot d) - (d dot d) * t = 0
+                    //
+                        float t = (dot(sphere_pos, ray.direction) - dot(ray.origin, ray.direction)) / dot(ray.direction, ray.direction);
+                        vec3 closest_point = ray.origin + (t * ray.direction);
+                        float l = length(closest_point - sphere_pos);
+                        if (l > sphere_size) {
+                            return l - sphere_size;
+                        }
+                        float remain_length = length(closest_point - ray.origin) - sqrt(sphere_size * sphere_size - l * l);
+                        return abs(remain_length);
+                    }
+
+                    float ray_marching(inout Ray ray) {
+                        for (int i = 0; i < 30; ++i) {
+                            float remain_length = calculate_remain_length(ray);
+                            if (abs(remain_length) < 1e-2) {
+                                return 0.0;
+                            }
+                            ray.origin += remain_length * normalize(ray.direction);
+                        }
+                        return calculate_remain_length(ray);
+                    }
+
+                    bool ray_marching_bool(inout Ray ray) {
+                        for (int i = 0; i < 30; ++i) {
+                            float remain_length = calculate_remain_length(ray);
+                            if (abs(remain_length) < 1e-2) {
+                                return true;
+                            }
+                            ray.origin += remain_length * normalize(ray.direction);
+                        }
+                        return false;
+                    }
+
                     void main() {
                         uint yidx = gl_GlobalInvocationID.x;
                         uint xidx = gl_GlobalInvocationID.y;
-                        data.data[yidx * 800 + xidx] = vec4(float(yidx) / 600, float(xidx) / 800, 0.0, 1.0) + 0.001 * vec4(ubo.a, ubo.a, ubo.a, 0.0);
+                        // Report parsing caps of cameraUbo and cameraUBO
+                        Ray ray = construct_ray(cameraUBO.camera, ivec2(int(xidx)-400, int(yidx)-300));
+                        float len_to_sphere = ray_marching(ray);
+//                        bool hit = ray_marching_bool(ray);
+//                        data.data[yidx * 800 + xidx] = vec4(int(hit) * vec3(1.0), 1.0);
+                        data.data[yidx * 800 + xidx] = vec4(vec3(len_to_sphere), 1.0);
+//                        data.data[yidx * 800 + xidx] = vec4(ray.origin, 1.0);
+//                        data.data[yidx * 800 + xidx] = vec4(-ray.direction, 1.0);
+//                        data.data[yidx * 800 + xidx] = vec4(float(yidx) / 600, float(xidx) / 800, 0.0, 1.0) + 0.001 * vec4(vec3(cameraUBO.camera.position.x), 0.0);
                     }
                 "
             }
@@ -470,20 +548,21 @@ fn main() {
 
     let uniform_data_buffer = {
         let data = Camera {
-            position: [0.0, 0.0, 0.0],
-            direction: [0.0, 0.0, 0.0],
-            up: [0.0, 0.0, 0.0],
-            fov: 45.0
+            position: [1.0, 0.0, 0.0],
+            direction: [-1.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov: 45.0,
         };
+        let data_vec: Vec<f32> = data.as_vec();
 
-        CpuAccessibleBuffer::from_data(
+        CpuAccessibleBuffer::from_iter(
             device.clone(),
             BufferUsage {
                 uniform_buffer: true,
                 ..BufferUsage::none()
             },
             false,
-            data,
+            data_vec.iter().cloned(),
         ).unwrap()
     };
 
@@ -662,8 +741,59 @@ fn main() {
                         compute_set.clone(),
                     )
                     .dispatch([600, 800, 1])
-                    .unwrap()
+                    .unwrap();
+                    // // TODO directly copy buffer to image isn't feasible, because framebuffer's ImageView don't have transfer bit allowed
+                    // .copy_buffer_to_image(data_buffer.clone(), output_image_view.image().clone())
+                    // .unwrap()
+                    //
+                    // .bind_vertex_buffers(0, vertex_buffer.clone())
+                    // .bind_vertex_buffers(1, texcoord_buffer.clone())
+                    // // Before we can draw, we have to *enter a render pass*. There are two methods to do
+                    // // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
+                    // // not covered here.
+                    // //
+                    // // The third parameter builds the list of values to clear the attachments with. The API
+                    // // is similar to the list of attachments when building the framebuffers, except that
+                    // // only the attachments that use `load: Clear` appear in the list.
+                    // .begin_render_pass(
+                    //     framebuffers[image_num].clone(),
+                    //     SubpassContents::Inline,
+                    //     clear_values,
+                    // )
+                    // .unwrap()
+                    // .bind_pipeline_graphics(pipeline.clone())
+                    // .bind_descriptor_sets(
+                    //     PipelineBindPoint::Graphics,
+                    //     pipeline.layout().clone(),
+                    //     0,
+                    //     graphic_set.clone(),
+                    // )
+                    // // We are now inside the first subpass of the render pass. We add a draw command.
+                    // //
+                    // // The last two parameters contain the list of resources to pass to the shaders.
+                    // // Since we used an `EmptyPipeline` object, the objects have to be `()`.
+                    // .draw(
+                    //     6,
+                    //     1,
+                    //     0,
+                    //     0,
+                    // )
+                    // .unwrap()
+                    // // We leave the render pass by calling `draw_end`. Note that if we had multiple
+                    // // subpasses we could have called `next_inline` (or `next_secondary`) to jump to the
+                    // // next subpass.
+                    // .end_render_pass()
+                    // .unwrap();
+                // Finish building the command buffer by calling `build`.
+                let command_buffer = builder.build().unwrap();
 
+                let mut graphic_builder = AutoCommandBufferBuilder::primary(
+                    device.clone(),
+                    queue.family(),
+                    CommandBufferUsage::OneTimeSubmit,
+                )
+                    .unwrap();
+                graphic_builder
                     // TODO directly copy buffer to image isn't feasible, because framebuffer's ImageView don't have transfer bit allowed
                     .copy_buffer_to_image(data_buffer.clone(), output_image_view.image().clone())
                     .unwrap()
@@ -708,13 +838,17 @@ fn main() {
                     .unwrap();
                 // Finish building the command buffer by calling `build`.
 
-                let command_buffer = builder.build().unwrap();
+                let graphic_command_buffer = graphic_builder.build().unwrap();
+
 
                 let future = previous_frame_end
                     .take()
                     .unwrap()
                     .join(acquire_future)
                     .then_execute(queue.clone(), command_buffer)
+                    .unwrap()
+                    .then_signal_semaphore()
+                    .then_execute(queue.clone(), graphic_command_buffer)
                     .unwrap()
                     // The color output is now expected to contain our triangle. But in order to show it on
                     // the screen, we have to *present* the image by calling `present`.
